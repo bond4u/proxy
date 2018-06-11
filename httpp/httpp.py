@@ -8,15 +8,19 @@ import http.server
 import socketserver
 import http.client
 import select
+import threading
 
 PROXY_PORT=80
 PROXY_PORT2=9001
 
 def log(s):
+  frm = "%Y-%m-%d %H:%M:%S"
+  tid = threading.get_ident()
+  tm = time.strftime(frm)
   try:
-    print(time.ctime()+" httpProxy: "+s,flush=True)
+    print(tm+" "+str(tid)+" httpProxy: "+s,flush=True)
   except (TypeError,UnicodeError,UnicodeEncodeError,UnicodeDecodeError) as err:
-    print(time.ctime()+" httpProxy: "+bytes(s,"utf-8"),flush=True)
+    print(tm+" "+str(tid)+" httpProxy: "+bytes(s,"utf-8"),flush=True)
 
 class ProxyHandler(http.server.SimpleHTTPRequestHandler):
   """Proxy class"""
@@ -92,11 +96,30 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     conn.request(self.command,self.path,headers=self.headers)
     resp = conn.getresponse()
     log("getFrom: "+str(resp.status)+", "+str(resp.reason)+", "+str(resp.version))
-    data = resp.read()
+    if "Content-Length" in resp.headers:
+      cl = resp.headers["Content-Length"]
+      log("getFrom: response length: "+cl)
+      cl = int(cl)
+    else:
+      log("getFrom: no response length")
+      cl = None
+      printHeaders = True
+    if printHeaders:
+      for h in resp.headers:
+        log("getFrom: resp.hdr: "+h+" = "+resp.headers[h])
+    resp.debuglevel=1
+    if None != cl:
+      try:
+        data = resp.read(cl)
+      except (Exception,Error) as err:
+        log("getFrom: read: error: "+str(err))
+    else:
+      data = resp.read()
+    resp.debuglevel=0
     log("getFrom: "+str(len(data))+" bytes of response read")
     if "Transfer-encoding" in resp.headers:
-      enc = resp.headers["Transfer-encoding"]
-      if "chunked"==enc:
+      trenc = resp.headers["Transfer-encoding"]
+      if "chunked"==trenc:
         log("getFrom: chunked -> fixed")
         del resp.headers["Transfer-encoding"]
         resp.headers["Content-Length"] = str(len(data))
@@ -106,8 +129,6 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     try:
       f2 = open(fn+".headers","t+w")
       for h in resp.headers:
-        if printHeaders:
-          log("getFrom: "+h+" = "+resp.headers[h])
         w2 += f2.write(h+": "+resp.headers[h]+"\n")
       f2.close()
     except (Exception,Error) as err:
@@ -138,6 +159,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     dir = "_jmm_"
     path = "/"+dir+self.path[4:]
     log("do_GET: fetching Admin")
+    for h in self.headers:
+      log("do_GET: req.hdr: "+h+" = "+self.headers[h])
     fn = self.cwd+path
     self.connectJmm(host)
     (hdrs,data) = self.getFrom(self.jmm,fn)
@@ -233,23 +256,43 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     if "jmm.azurewebsites.net"==host:
       #log("do_POST: "+host+" is JMM")
       #for h in self.headers:
-      #  log("do_POST: in: "+h+" = "+self.headers[h])
-      dl = int(self.headers['Content-Length'])
-      log("do_POST: reading req body of "+str(dl)+" bytes")
-      data = self.rfile.read(dl)
+        #log("do_POST: in: "+h+" = "+self.headers[h])
+      if "Content-Length" in self.headers:
+        cl = self.headers["Content-Length"]
+        log("do_POST: inc data len: "+cl)
+        cl = int(cl)
+      else:
+        log("do_POST: no req data len given")
+        cl = None
+      if None != cl:
+        log("do_POST: reading req body of "+str(cl)+" bytes")
+        data = self.rfile.read(cl)
+      else:
+        log("do_POST: reading all..")
+        data = self.rfile.read()
       log("do_POST: read req "+str(len(data))+" bytes: "+str(data[:25]))
       self.connectJmm(host)
       resp = self.postTo(self.jmm,data)
-      dl = int(resp.headers['Content-Length'])
-      log("do_POST: reading resp body of "+str(dl)+" bytes")
-      data = resp.read(dl)
+      if "Content-Length" in resp.headers:
+        cl = resp.headers["Content-Length"]
+        log("do_POST: resp data len: "+cl)
+        cl = int(cl)
+      else:
+        cl = None
+        log("do_POST: no resp data len given")
+      if None != cl:
+        log("do_POST: reading resp body of "+str(cl)+" bytes")
+        data = resp.read(cl)
+      else:
+        log("do_POST: reading all..")
+        data = resp.read()
       log("do_POST: read resp "+str(len(data))+" bytes: "+str(data[:25]))
       self.send_response(resp.status,resp.reason)
       for h in resp.headers:
-        log("do_POST: out: "+h+" = "+resp.headers[h])
+        #log("do_POST: out: "+h+" = "+resp.headers[h])
         self.send_header(h,resp.headers[h])
       self.end_headers()
-      if 0<dl:
+      if 0 < len(data):
         d = self.wfile.write(data)
         log("do_POST: wrote resp of "+str(d)+" bytes")
       #log("do_POST: closing output stream")
@@ -322,17 +365,24 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
 
 log("starting..")
 handler_class = ProxyHandler
+
 httpd1 = http.server.HTTPServer(("",PROXY_PORT), handler_class)
+t = threading.Thread(target=httpd1.serve_forever)
+log("serving at port "+str(PROXY_PORT))
+t.start()
+
 httpd2 = http.server.HTTPServer(("",PROXY_PORT2), handler_class)
 log("serving at port "+str(PROXY_PORT)+" and "+str(PROXY_PORT2))
-#httpd.serve_forever()
+httpd2.serve_forever()
 
-select_timeout=0.1
-while True:
-  r,w,e = select.select([httpd1,httpd2],[],[],select_timeout)
-  if httpd1 in r:
-    httpd1.handle_request()
-  if httpd2 in r:
-    httpd2.handle_request()
+#select_timeout=0.1
+#while True:
+#  r,w,e = select.select([httpd1,httpd2],[],[],select_timeout)
+#  if httpd1 in r:
+#    httpd1.handle_request()
+#  if httpd2 in r:
+#    httpd2.handle_request()
 
+httpd2.shutdown()
+httpd1.shutdown()
 log("Done.")
