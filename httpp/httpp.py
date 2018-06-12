@@ -9,6 +9,7 @@ import socketserver
 import http.client
 import select
 import threading
+import socketserver
 
 PROXY_PORT=80
 PROXY_PORT2=9001
@@ -363,16 +364,21 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
       log("respond: sent "+(str(d))+" bytes of "+str(len(data)))
     #self.wfile.close()
 
+class ThreadedHttpServer(socketserver.ThreadingMixIn,http.server.HTTPServer):
+  pass
+
 log("starting..")
 handler_class = ProxyHandler
 
-httpd1 = http.server.HTTPServer(("",PROXY_PORT), handler_class)
+#httpd1 = http.server.HTTPServer(("",PROXY_PORT), handler_class)
+httpd1 = ThreadedHttpServer(("",PROXY_PORT),handler_class)
 t = threading.Thread(target=httpd1.serve_forever)
 log("serving at port "+str(PROXY_PORT))
 t.start()
 
-httpd2 = http.server.HTTPServer(("",PROXY_PORT2), handler_class)
-log("serving at port "+str(PROXY_PORT)+" and "+str(PROXY_PORT2))
+#httpd2 = http.server.HTTPServer(("",PROXY_PORT2), handler_class)
+httpd2 = ThreadedHttpServer(("",PROXY_PORT2),handler_class)
+log("serving at port "+str(PROXY_PORT2))
 httpd2.serve_forever()
 
 #select_timeout=0.1
@@ -383,6 +389,7 @@ httpd2.serve_forever()
 #  if httpd2 in r:
 #    httpd2.handle_request()
 
+log("shutting down")
 httpd2.shutdown()
 httpd1.shutdown()
 log("Done.")
