@@ -17,6 +17,8 @@ import MyListCache
 import MyListStatsCache
 import zlib
 import traceback
+import os
+import sys
 
 # proxy listening port
 listPort = 9000
@@ -51,7 +53,14 @@ def sig_int_handler(sig, frame):
   g_sigInt = True
 
 def log(s,fallback=True):
+  # attempting to print utf stuff, may fail
   try:
+    #i = s.find("&pass=")
+    #if -1 != i:
+      #remove password, obv pwd with & is gonna mess things up
+    #  z = s[i+1:]
+    #  j = z.find("&")
+    #  s = s[:i+1]+z[j:]
     print(time.ctime()+" udpProxy: "+s,flush=True)
   except (TypeError,UnicodeError,UnicodeEncodeError,UnicodeDecodeError) as err:
     if not fallback:
@@ -77,9 +86,11 @@ listSock.settimeout(listTimeout)
 global g_cSess
 g_cSess = {}
 
-global g_fileCache
-g_fileCache = FileCache.FileCache("proxy-files-cache.txt")
-g_fileCache.load()
+# loading data files makes startup process several minutes long
+# probably because excessive logging
+#global g_fileCache
+#g_fileCache = FileCache.FileCache("proxy-files-cache.txt")
+#g_fileCache.load()
 
 global g_calCache
 g_calCache = CalCache.CalCache("proxy-calendar-cache.txt")
@@ -114,7 +125,7 @@ def inflate(data,level=0):
 def det_enc(s):
   encs = ["utf-16-le","utf-16-be","utf-16","utf-8"]
   d = {}
-  log("det_enc in: "+str(s))
+  #log("det_enc in: "+str(s))
   for enc in encs:
     try:
       d[enc] = s.decode(enc)
@@ -126,7 +137,7 @@ def det_enc(s):
   for enc in encs:
     if None!=d[enc]:
       break
-  log("det_enc: rval: "+enc)
+  #log("det_enc: rval: "+enc)
   return enc
 
 def getCmd(s):
@@ -156,6 +167,39 @@ def getRespCode(s):
     code = s
     s = ""
   return (code,s)
+
+def readFile(fn):
+  '''Attempts to read from file, returns data,c_time,m_time triplet'''
+  log("readFile: "+fn)
+  if os.access(fn, os.R_OK):
+    a = os.stat(fn)
+    log("readFile: accessible: "+str(a))
+    try:
+      f = open(fn,"b+r")
+      d = f.read()
+      f.close()
+    except:
+      log("readFile: error: "+str(sys.exc_info()))
+      raise
+    triplet = (d,a.st_ctime,a.st_mtime)
+  else:
+   log("readFile: file is not accessible")
+   triplet = (None,None,None)
+  return triplet
+
+def writeFile(fn,d):
+  '''Creates a file with data'''
+  log("writeFile: "+fn)
+  try:
+    p = os.path.dirname(fn)
+    os.makedirs(p,exist_ok=True)
+    f = open(fn,"b+w")
+    w = f.write(d)
+    f.close()
+    log("writeFile: "+str(w)+" of "+str(len(d))+" written")
+  except:
+    log("writeFile: error: "+str(sys.exc_info()))
+    raise
 
 class SrvConnThrd(threading.Thread):
   '''Client socket to server with thread'''
@@ -201,12 +245,12 @@ class SrvConnThrd(threading.Thread):
     self.log("sending to server: "+data)
     try:
       data = data.encode("utf-8")
-      self.log("send: unicode encode ok")
+      #self.log("send: unicode encode ok")
     except (UnicodeError,UnicodeEncodeError) as err:
       self.log("send: unicode encode error: "+str(err))
     try:
       r = self.sock.send(data)
-      self.log("sent: "+str(r))
+      #self.log("sent: "+str(r))
     except socket.timeout:
       self.log("send timeout")
       r = None
@@ -214,36 +258,39 @@ class SrvConnThrd(threading.Thread):
     self.sendTime = time.time()
     return r
   def recv(self):
-    '''Receives any data from server'''
+    '''Receives any data from server, returns text,binary pair'''
+    txtdata = None
     if None != self.sock:
       try:
-        data = self.sock.recv(MAX_PKT_SIZE)
+        bindata = self.sock.recv(MAX_PKT_SIZE)
         self.recvTime = time.time()
-        if 0==data[0] and 0==data[1]:
+        if 0==bindata[0] and 0==bindata[1]:
           try:
-            self.log("recv: 0,0 inflating..")
-            data = inflate(data[2:])
-            self.log("recv: inflated '"+str(data)+"'")
+            #self.log("recv: 0,0 inflating..")
+            data = inflate(bindata[2:])
+            #self.log("recv: inflated '"+str(data)+"'")
           except:
             self.log("recv: inflate error")
+        else:
+          data = bindata
         enc = det_enc(data)
         self.log("recv: enc: "+enc+" type: "+str(type(data)))
         try:
-          d2 = data.decode("utf-8")
-          self.log("recv: unicode decode ok")
+          txtdata = data.decode("utf-8")
+          #self.log("recv: unicode decode ok")
         except UnicodeError as err:
           self.log("recv: unicode decode error: "+str(err))
         # print uses ascii coding and that cant print unicode
-        self.log("received from server: "+str(data))
+        self.log("received from server: "+str(txtdata))
       except socket.timeout:
-        d2 = None
+        bindata = None
       except ConnectionRefusedError:
-        d2 = None
+        bindata = None
         self.disconnect()
     else: # no connection yet
-      d2 = None
+      bindata = None
       time.sleep(0.1) # just sleep a bit
-    return d2
+    return (txtdata,bindata)
   def login(self):
     if None == self.sessId:
       global g_cSess
@@ -264,13 +311,14 @@ class SrvConnThrd(threading.Thread):
     '''Thread loop'''
     global g_sigInt
     while (False == self.stopFlag) and (False == g_sigInt):
-      resp = None
+      tresp = None
+      bresp = None
       if None == self.sending:
         # have not sent anything
         cooldown = True
         now = time.time()
         if None == self.recvTime:
-          self.log("run: no previous recv, sending now")
+          #self.log("run: no previous recv, sending now")
           cooldown = False
         elif (None != self.shortStart) and (self.shortStart+self.shortPeriod > now):
           # use short delay
@@ -306,18 +354,18 @@ or ("MYLISTSTATS"==req) or ("MYLISTSTATS "==req[:12]):
               self.sending = t
               self.send(req,addr)
         else: #nothing to send, sleep on socket
-          resp = self.recv()
+          (tresp,bresp) = self.recv()
       else: #sent request, wait for response
         self.log("sent something, waiting for response")
-        resp = self.recv()
-      if (None != self.sending) and (None != resp):
+        (tresp,bresp) = self.recv()
+      if (None != self.sending) and (None != tresp):
         # got response, do we had timeout and need to re-login?
-        (code,text) = getRespCode(resp)
-        self.log("recv: code '"+str(code)+"', '"+str(text)+"'")
+        (code,text) = getRespCode(tresp)
+        self.log("run: code '"+str(code)+"'") #, '"+str(text)+"'")
         (req,addr) = self.sending
-        self.log("recv: req '"+str(req)+"', '"+str(addr)+"'")
+        self.log("run: req '"+str(req)+"', '"+str(addr)+"'")
         (cmd,params) = getCmd(req)
-        self.log("recv: cmd '"+str(cmd)+"', '"+str(params)+"'")
+        self.log("run: cmd '"+str(cmd)+"', '"+str(params)+"'")
         if "501"==code:
           req = SessId.removeSess(req)
           self.log("501: clearing sessId: "+str(req))
@@ -326,51 +374,54 @@ or ("MYLISTSTATS"==req) or ("MYLISTSTATS "==req[:12]):
           self.reqs.insertFront(t)
           self.log("req re-added: "+str(self.reqs.size()))
           req = None
-          resp = None
+          tresp = None
+          bresp = None
           cmd = ""
         if "AUTH" == cmd:
-          vals = resp.split(" ",2)
+          vals = tresp.split(" ",2)
           # 1st is code, 2nd is session, rest is text
           self.sessId = vals[1]
           self.log("using session id: "+self.sessId+", addr: "+str(addr))
           addr = None
         elif "FILE" == cmd:
-          self.log("adding to fileCache: '"+str(params)+"', '"+str(resp)+"'")
-          global g_fileCache
-          g_fileCache.addFile(params,resp,True)
+          self.log("adding to fileCache: '"+str(params)+"', '"+str(tresp)+"'")
+          #global g_fileCache
+          #g_fileCache.addFile(params,resp,True)
+          fn = "FILE/"+SessId.removeSess(params)
+          writeFile(fn,bresp)
         elif "CALENDAR" == cmd:
           self.log("adding to calCache")
           global g_calCache
-          g_calCache.set(resp,True)
+          g_calCache.set(tresp,True)
         elif "UPDATED" == cmd:
           self.log("adding to updCache")
           global g_updCache
-          g_updCache.set(params,resp,True)
+          g_updCache.set(params,tresp,True)
         elif "EPISODE" == cmd:
           self.log("adding to epiCache")
           global g_epiCache
-          g_epiCache.set(params,resp,True)
+          g_epiCache.set(params,tresp,True)
         elif "GROUPSTATUS" == cmd:
           self.log("adding to grStaCache")
           global g_grStaCache
-          g_grStaCache.set(params,resp,True)
+          g_grStaCache.set(params,tresp,True)
         elif "MYLISTADD" == cmd:
           self.log("adding to myListCache")
           global g_myListCache
-          g_myListCache.set(params,resp,True)
+          g_myListCache.set(params,tresp,True)
         elif "MYLISTSTATS" == cmd:
           self.log("adding to myListStatsCache")
           global g_myLSCache
-          g_myLSCache.set(resp,True)
-        if None!=resp and None!=addr:
+          g_myLSCache.set(tresp,True)
+        if (None != tresp) and (None != addr):
           # some utf chars can't be printed out in ascii
-          self.log("queuing to: "+str(addr)+" response: "+str(resp))
-          self.resps.add((resp,addr,None))
+          self.log("queuing to: "+str(addr)+" response: "+str(tresp))
+          self.resps.add((tresp,addr,None))
           self.log("resps queue size: "+str(self.resps.size()))
         else:
           self.log("no resp or no addr")
         self.sending = None
-      elif (None != self.sending) and (None == resp):
+      elif (None != self.sending) and (None == tresp):
         if (None != self.sendTime) and (None == self.recvTime or self.sendTime > self.recvTime):
           delta = time.time() - self.sendTime
           if 60 <= delta:
@@ -380,7 +431,6 @@ or ("MYLISTSTATS"==req) or ("MYLISTSTATS "==req[:12]):
             self.reqs.insertFront(t)
             self.log("req re-added: "+str(self.reqs.size()))
             req = None
-            resp = None
   def stop(self):
     '''Sets thread stop flag'''
     self.stopFlag = True
@@ -394,7 +444,7 @@ def doRefresh(cmd,idate,udate):
   r = True
   h24 = 24*60*60 # 24 hours is how many seconds?
   log("doRefresh: start: "+str(idate)+", "+str(udate))
-  if None == udate:
+  if (None == udate) or (idate == udate):
     # wait at least 24h before refreshing again
     r = (idate+h24) < time.time()
     log("doRefresh: over 24h have passed since "+cmd+" IDATE: "+str(r))
@@ -423,24 +473,28 @@ def handleClient(data,addr,pEnc):
     log("handleClient: PING response: "+resp)
     g_resps.add((resp,addr,"utf-8"))
   elif "FILE" == cmd:
-    global g_fileCache
-    (req,resp,idate,udate) = g_fileCache.parse(params)
-    log("handleClient: FILE: params '"+str(params)+"', '"+str(req)+"'")
-    resp = g_fileCache.getFile(req)
-    log("handleClient: FILE: resp '"+str(resp)+"'")
+    #global g_fileCache
+    #(req,resp,idate,udate) = g_fileCache.parse(params)
+    req = SessId.removeSess(params)
+    #log("handleClient: FILE: params '"+str(params)+"', '"+str(req)+"'")
+    #resp = g_fileCache.getFile(req)
+    (bresp,idate,udate) = readFile("FILE/"+req)
+    #log("handleClient: FILE: resp '"+str(resp)+"'")
     req2 = cmd+" "+req
-    if None == resp:
+    if None == bresp:
       log("handleClient: not in fileCache, queue to server: "+str(req2))
       g_reqs.add((req2,addr))
     else:
-      log("handleClient: checking fileCache dates")
-      (idate,udate) = g_fileCache.getFileDates(req)
+      #log("handleClient: checking fileCache dates")
+      #(idate,udate) = g_fileCache.getFileDates(req)
       if doRefresh(cmd,idate,udate):
         log("handleClient: fileCached data is old, refreshing: "+str(req2))
         g_reqs.add((req2,addr))
       else:
         log("handleClient: using fileCache response")
-        g_resps.add((resp,addr,pEnc))
+        #have to convert bytes from file to text and then to client encoding
+        tresp = bresp.decode("utf-8")
+        g_resps.add((tresp,addr,pEnc))
   elif "LOGOUT" == cmd:
     if "s=" == params[:2]:
       if params[2:] == sessId:
@@ -591,6 +645,7 @@ while False==g_sigInt:
         resp = "301 NOT LOGGED IN"
       g_resps.add((resp,addr,dEnc))
     #log("main: added to queue: "+str(g_reqs.size()))
+  #else no data received
   t = g_resps.get()
   if None != t:
     (resp,addr,pEnc) = t
@@ -615,7 +670,8 @@ while False==g_sigInt:
     try:
       listSock.sendto(resp,addr)
     except socket.timeout:
-      log("main: client timed out: "+str(addr))
+      log("main: send to client timed out: "+str(addr))
+  #else nothing to respond
 
 log("main: finishing..")
 listSock.close()

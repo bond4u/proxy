@@ -10,9 +10,11 @@ import http.client
 import select
 import threading
 import socketserver
+import ssl
 
 PROXY_PORT=80
 PROXY_PORT2=9001
+PROXY_PORT3=443
 
 def log(s):
   frm = "%Y-%m-%d %H:%M:%S"
@@ -83,11 +85,11 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
       age = ct - t
       if age < sds:
         # created less than 7 days ago, use cache
-        log("check: from cache")
+        log("check: less than 7 days old: from cache")
         pair = self.readFrom(fn)
       else:
         # created more than 7 days ago, refresh
-        log("check: older than 7 days")
+        log("check: older than 7 days: refreshing")
     else:
       log("check: header and body files not accessible")
     return pair
@@ -147,19 +149,19 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     dir = "_jmm_"
     path = "/"+dir+self.path[4:]
     fn = self.cwd+path
-    #log("do_GET: checking: "+fn)
+    #log("handleJmmMedia: file: "+fn)
     pair = self.check(fn)
     if None != pair:
       (hdrs,data) = pair
     else:
       # not in cache, get it
       self.connectJmm(host)
-      (hdrs,data) = self.getFrom(self.jmm,fn,True)
+      (hdrs,data) = self.getFrom(self.jmm,fn)
     self.respond(200,"Ok",hdrs,data)
   def handleJmmAdmin(self,host):
     dir = "_jmm_"
     path = "/"+dir+self.path[4:]
-    log("do_GET: fetching Admin")
+    log("handleJmmAdmin: fetching Admin")
     for h in self.headers:
       log("do_GET: req.hdr: "+h+" = "+self.headers[h])
     fn = self.cwd+path
@@ -221,14 +223,21 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         args2 = args.split("&")
         #log("do_GET: args2: "+str(args2))
         isAniReq = ("request=anime" in args2)
+        isMyListReq = ("request=mylist" in args2)
         aid=""
         for z in args2:
           if "aid="==z[:4]:
             aid=z[4:]
+        fn = None
         if isAniReq and ""!=aid:
           dir = "_adb_"
           path = "/"+dir+"/anime/"+aid
           fn = self.cwd+path
+        elif isMyListReq:
+          dir = "_adb_"
+          path = "/"+dir+"/mylist"
+          fn = self.cwd+path
+        if None != fn:
           log("do_GET: checking: "+fn)
           pair = self.check(fn)
           if None != pair:
@@ -237,9 +246,9 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
             # not in cache, get it
             self.connectAdb(host)
             (hdrs,data) = self.getFrom(self.adb,fn,True)
-            self.respond(200,"Ok",hdrs,data)
+          self.respond(200,"Ok",hdrs,data)
           handled = True
-        #else not "anime" request
+        #else not "anime" and not "mylist" request
       #else not handled
     elif "thetvdb.com"==host:
       if "/banners/"==self.path[:9]:
@@ -372,14 +381,21 @@ handler_class = ProxyHandler
 
 #httpd1 = http.server.HTTPServer(("",PROXY_PORT), handler_class)
 httpd1 = ThreadedHttpServer(("",PROXY_PORT),handler_class)
-t = threading.Thread(target=httpd1.serve_forever)
+t1 = threading.Thread(target=httpd1.serve_forever)
 log("serving at port "+str(PROXY_PORT))
-t.start()
+t1.start()
 
 #httpd2 = http.server.HTTPServer(("",PROXY_PORT2), handler_class)
 httpd2 = ThreadedHttpServer(("",PROXY_PORT2),handler_class)
+t2 = threading.Thread(target=httpd2.serve_forever)
 log("serving at port "+str(PROXY_PORT2))
-httpd2.serve_forever()
+t2.start()
+
+httpd3 = ThreadedHttpServer(("",PROXY_PORT3),handler_class)
+httpd3.socket = ssl.wrap_socket(httpd3.socket,server_side=True, \
+ certfile='localhost.pem',ssl_version=ssl.PROTOCOL_TLSv1)
+log("serving at port "+str(PROXY_PORT3))
+httpd3.serve_forever()
 
 #select_timeout=0.1
 #while True:
