@@ -10,3 +10,6 @@ redirect to another jail:
 
 ..etc
 Then in 192.168.1.10 jail run proxy which caches data.
+
+Self-signed certificate for HTTPS:
+https://docs.python.org/3/library/ssl.html#combined-key-and-certificate

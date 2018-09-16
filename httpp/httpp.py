@@ -11,15 +11,16 @@ import select
 import threading
 import socketserver
 import ssl
+import datetime
 
 PROXY_PORT=80
 PROXY_PORT2=9001
 PROXY_PORT3=443
 
 def log(s):
-  frm = "%Y-%m-%d %H:%M:%S"
+  frm = "%Y-%m-%d %H:%M:%S.%f"
   tid = threading.get_ident()
-  tm = time.strftime(frm)
+  tm = datetime.datetime.now().strftime(frm)
   try:
     print(tm+" "+str(tid)+" httpProxy: "+s,flush=True)
   except (TypeError,UnicodeError,UnicodeEncodeError,UnicodeDecodeError) as err:
@@ -245,7 +246,7 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
           else:
             # not in cache, get it
             self.connectAdb(host)
-            (hdrs,data) = self.getFrom(self.adb,fn,True)
+            (hdrs,data) = self.getFrom(self.adb,fn)
           self.respond(200,"Ok",hdrs,data)
           handled = True
         #else not "anime" and not "mylist" request

@@ -19,6 +19,7 @@ import zlib
 import traceback
 import os
 import sys
+import datetime
 
 # proxy listening port
 listPort = 9000
@@ -52,8 +53,21 @@ def sig_int_handler(sig, frame):
   global g_sigInt
   g_sigInt = True
 
+def sig_usr1_handler(sig, frame):
+  id2name = dict([(th.ident, th.name) for th in threading.enumerate()])
+  code = []
+  for tid, stack in sys._current_frames().items():
+    code.append("\n# Thread: %s(%d)" % (id2name.get(tid,""), tid))
+    for fn, lno, name, line in traceback.extract_stack(stack):
+      code.append("File: '%s', line %d, in %s" % (fn, lno, name))
+      if line:
+        code.append("  %s" % (line.strip()))
+  log("\n".join(code))
+
 def log(s,fallback=True):
   # attempting to print utf stuff, may fail
+  frm = "%Y-%m-%d %H:%M:%S.%f"
+  ts = datetime.datetime.now().strftime(frm)
   try:
     #i = s.find("&pass=")
     #if -1 != i:
@@ -61,18 +75,19 @@ def log(s,fallback=True):
     #  z = s[i+1:]
     #  j = z.find("&")
     #  s = s[:i+1]+z[j:]
-    print(time.ctime()+" udpProxy: "+s,flush=True)
+    print(ts+" udpProxy: "+s,flush=True)
   except (TypeError,UnicodeError,UnicodeEncodeError,UnicodeDecodeError) as err:
     if not fallback:
       raise err
     z = bytes(s,"utf-8")
-    print(time.ctime()+" udpProxy: bytes: "+str(z),flush=True)
+    print(ts+" udpProxy: bytes: "+str(z),flush=True)
 
 log("main: start")
 signal.signal(signal.SIGHUP, sig_int_handler)
 signal.signal(signal.SIGINT, sig_int_handler)
 signal.signal(signal.SIGQUIT, sig_int_handler)
 signal.signal(signal.SIGTERM, sig_int_handler)
+signal.signal(signal.SIGUSR1, sig_usr1_handler)
 
 # listening socket for incoming client connections
 listSock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -267,14 +282,14 @@ class SrvConnThrd(threading.Thread):
         if 0==bindata[0] and 0==bindata[1]:
           try:
             #self.log("recv: 0,0 inflating..")
-            data = inflate(bindata[2:])
+	            data = inflate(bindata[2:])
             #self.log("recv: inflated '"+str(data)+"'")
           except:
             self.log("recv: inflate error")
         else:
           data = bindata
         enc = det_enc(data)
-        self.log("recv: enc: "+enc+" type: "+str(type(data)))
+        self.log("recv: detenc: "+enc+" type: "+str(type(data)))
         try:
           txtdata = data.decode("utf-8")
           #self.log("recv: unicode decode ok")
@@ -642,7 +657,7 @@ while False==g_sigInt:
         log("main: client sessions: "+str(len(g_cSess)))
         resp = "200 "+sid+" LOGIN ACCEPTED"
       else:
-        resp = "301 NOT LOGGED IN"
+        resp = "506 INVALID SESSION" #301 NOT LOGGED IN"
       g_resps.add((resp,addr,dEnc))
     #log("main: added to queue: "+str(g_reqs.size()))
   #else no data received
@@ -651,10 +666,11 @@ while False==g_sigInt:
     (resp,addr,pEnc) = t
     log("main: resp: '"+str(addr)+"', enc: '"+str(pEnc)+"', resp: "+str(resp))
     if addr in g_cSess:
+      log("main: addr "+str(addr)+" is in clients list "+str(len(g_cSess)))
       sd = g_cSess[addr]
-      #log("main: respond session: "+str(sd))
+      log("main: respond session: "+str(sd))
       if None == pEnc:
-        if None != sd["ENC2"]:
+        if "ENC2" in sd:
           pEnc = sd["ENC2"]
           log("main: resp sess temp enc: "+str(pEnc))
           del sd["ENC2"]
@@ -664,9 +680,11 @@ while False==g_sigInt:
       else:
         log("main: resp enc: "+str(pEnc))
     else:
-      log("addr "+str(addr)+" not known")
+      log("main: addr "+str(addr)+" is not known")
     log("main: responding to: "+str(addr)+" '"+str(pEnc)+"' with: "+str(resp))
     resp = resp.encode(pEnc)
+    if "utf-16-be" == pEnc:
+      resp = bytes([0xFE,0xFF])+resp
     try:
       listSock.sendto(resp,addr)
     except socket.timeout:
